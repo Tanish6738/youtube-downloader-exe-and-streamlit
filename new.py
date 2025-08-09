@@ -50,6 +50,36 @@ def _collect_output_files(info: dict) -> list:
         paths.append(top_path)
     return paths
 
+def _best_default_download_dir() -> str:
+    """Return a writable default output directory.
+    Prefer CWD if writable; otherwise use the system temp dir.
+    """
+    cwd = os.getcwd()
+    try:
+        # Quick writability probe
+        with tempfile.NamedTemporaryFile(dir=cwd, delete=True) as _:
+            pass
+        return cwd
+    except OSError:
+        return tempfile.gettempdir()
+
+def _ensure_writable_dir(path: str) -> tuple[str, bool]:
+    """Ensure 'path' exists and is writable; if not, fallback to temp dir.
+    Returns (resolved_path, is_requested_path_usable).
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path, delete=True) as _:
+            pass
+        return path, True
+    except OSError:
+        tmp_dir = tempfile.gettempdir()
+        try:
+            os.makedirs(tmp_dir, exist_ok=True)
+        except OSError:
+            pass
+        return tmp_dir, False
+
 # Background fetch task for video info
 def _extract_info_task_fn(video_url: str, info_ref: dict, error_ref: dict):
     try:
@@ -104,7 +134,16 @@ if url:
     )
 
     # Download path
-    download_path = st.text_input("Enter download folder path (leave blank for current folder):", value=os.getcwd())
+    default_dir = _best_default_download_dir()
+    download_path = st.text_input(
+        "Enter download folder path (server-side; you'll still get a browser download button)",
+        value=default_dir,
+        help="On hosted/online deployments, the app writes to a temporary server folder and then offers a browser download."
+    )
+    # Validate/adjust chosen path for hosted environments
+    download_path, ok = _ensure_writable_dir(download_path)
+    if not ok:
+        st.info(f"Output path not writable on this environment; using temporary folder: {download_path}")
 
     # Advanced options to help with HTTP 403 and restrictions
     cookies_temp_path = None
