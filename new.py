@@ -120,6 +120,7 @@ if url:
     video_author = info_dict.get('uploader', 'unknown')
     video_length = info_dict.get('duration', 0)
     video_views = info_dict.get('view_count', 0)
+    available_formats = info_dict.get('formats', [])
 
     st.subheader("📄 Video Information")
     st.write(f"**Title:** {video_title}")
@@ -165,6 +166,21 @@ if url:
             with yt_dlp.YoutubeDL({'listformats': True}) as ydl_formats:
                 st.info("Listing available formats in the terminal log...")
                 ydl_formats.extract_info(url, download=False)
+        # Also show formats in-app for convenience
+        if available_formats:
+            fmt_rows = []
+            for f in available_formats:
+                fmt_rows.append({
+                    'id': f.get('format_id'),
+                    'ext': f.get('ext'),
+                    'res': f.get('format_note') or (f"{f.get('width','?')}x{f.get('height','?')}") ,
+                    'vcodec': f.get('vcodec'),
+                    'acodec': f.get('acodec'),
+                    'fps': f.get('fps'),
+                    'tbr': f.get('tbr'),
+                    'filesize': f.get('filesize') or f.get('filesize_approx')
+                })
+            st.dataframe(fmt_rows, use_container_width=True, hide_index=True)
         format_code = st.text_input("Enter the format code(s) for download (e.g., '137+140'):")
 
     # Download button
@@ -203,6 +219,7 @@ if url:
             'postprocessors': [],
             'progress_hooks': [_progress_hook],
             'quiet': True,
+            'merge_output_format': 'mp4',
             # Improve reliability/mitigate 403s
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
@@ -228,9 +245,10 @@ if url:
             ydl_opts['source_address'] = '0.0.0.0'
 
         if choice == "Video and Audio (Highest Quality)":
-            ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best'
+            # Prefer separate streams then best mp4, else any best
+            ydl_opts['format'] = 'bv*+ba/b[ext=mp4]/b'
         elif choice == "Audio only (Highest Quality)":
-            ydl_opts['format'] = 'bestaudio'
+            ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -260,7 +278,35 @@ if url:
             else:
                 st.success("✅ Download completed successfully!")
         except yt_dlp.utils.DownloadError as e:
-            st.error(f"Error downloading video: {e}")
+            msg = str(e)
+            if 'Requested format is not available' in msg or 'format not available' in msg.lower():
+                # Retry with a safe auto format chain
+                status_text.markdown("Requested format unavailable. Retrying with an automatic best format…")
+                try:
+                    ydl_opts['format'] = 'bv*+ba/b'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl_download:
+                        info_result = ydl_download.extract_info(url, download=True)
+                    downloaded_files = _collect_output_files(info_result)
+                    if downloaded_files:
+                        st.success("✅ Download completed successfully! Use the buttons below to save to your device.")
+                        for idx, fpath in enumerate(downloaded_files):
+                            try:
+                                with open(fpath, 'rb') as fh:
+                                    st.download_button(
+                                        label=f"Download {os.path.basename(fpath)}",
+                                        data=fh.read(),
+                                        file_name=os.path.basename(fpath),
+                                        mime=_infer_mime(fpath),
+                                        key=f"dlbtn-retry-{idx}-{os.path.basename(fpath)}"
+                                    )
+                            except OSError as read_err:
+                                st.warning(f"Downloaded file is not accessible: {read_err}")
+                    else:
+                        st.success("✅ Download completed successfully!")
+                except yt_dlp.utils.DownloadError as e2:
+                    st.error(f"Error downloading with fallback: {e2}")
+            else:
+                st.error(f"Error downloading video: {e}")
         finally:
             # Cleanup temp cookies file if used
             try:
